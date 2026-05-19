@@ -48,6 +48,32 @@ CLR_IDLE = '#A6E3A1'
 CLR_BUSY = '#F38BA8'
 CLR_JAM  = '#FAB387'
 
+
+def parse_scilab_feedback(line: str) -> dict[str, str] | None:
+    """Arduino 피드백: ``FB,...`` 또는 ``SENSOR,...`` (KEY:VAL 콤마 구분)."""
+    line = line.strip()
+    if line.startswith('FB,'):
+        body = line[3:]
+    elif line.startswith('SENSOR,'):
+        body = line[7:]
+    else:
+        return None
+    out: dict[str, str] = {}
+    for part in body.split(','):
+        part = part.strip()
+        if ':' not in part:
+            continue
+        k, v = part.split(':', 1)
+        out[k.strip()] = v.strip()
+    return out
+
+
+def _fb_get(s: dict[str, str], *keys: str, default: str = '-') -> str:
+    for k in keys:
+        if k in s and str(s[k]).strip() != '':
+            return str(s[k]).strip()
+    return default
+
 SLOT_INDEX_VALUES = [0, 1, 2, 3, 4, 5]
 
 GRAPH_WINDOW_SEC = 60
@@ -430,12 +456,11 @@ class SciLabTab(QWidget):
         if ms.isdigit() and int(ms) > 0: self._cmd(f'PUMP23_RUN:{d},{ms}')
 
     def _on_feedback(self, line: str) -> None:
-        if not line.startswith('FB,'): return
-        s: dict[str, str] = {}
-        for p in line[3:].split(','):
-            if ':' in p:
-                k, v = p.split(':', 1); s[k.strip()] = v.strip()
-        self._latest = s; self._update_ui(s)
+        s = parse_scilab_feedback(line)
+        if s is None:
+            return
+        self._latest = s
+        self._update_ui(s)
 
     def _state_bg(self, st: str) -> str:
         if st == 'IDLE': return CLR_IDLE
@@ -444,36 +469,42 @@ class SciLabTab(QWidget):
         return '#313244'
 
     def _update_ui(self, s: dict) -> None:
-        ds = s.get('DRILL_STATE', '-')
+        ds = _fb_get(s, 'DRILL_STATE', 'M1_STATE')
         self._drill_st.set_value(
-            '작동' if ds == 'RUN' else '정지' if ds == 'STOP' else ds,
-            CLR_BUSY if ds == 'RUN' else CLR_IDLE if ds == 'STOP' else '#313244',
+            '작동' if ds == 'RUN' else '정지' if ds in ('STOP', 'IDLE') else ds,
+            CLR_BUSY if ds == 'RUN' else CLR_IDLE if ds in ('STOP', 'IDLE') else '#313244',
         )
-        drpm = s.get('DRILL_RPM', '-')
-        if drpm in ('-', ''):
+        drpm = _fb_get(s, 'DRILL_RPM', 'M1_RPM')
+        if drpm == '-':
             self._drill_rpm_fb.set_value('-')
         else:
             try:
                 self._drill_rpm_fb.set_value(f'{int(float(drpm))} rpm')
             except ValueError:
                 self._drill_rpm_fb.set_value(f'{drpm} rpm')
-        m2 = s.get('M2_STATE','-')
-        self._m2_state.set_value(m2, self._state_bg(m2))
-        self._m2_fb.set_value(f"{s.get('M2_MM_FB','-')} mm")
-        self._m2_cmd.set_value(f"{s.get('M2_MM_CMD','-')} mm")
-        self._m2_err.set_value(f"{s.get('M2_ERR_MM','-')} mm")
-        self._canister_st.set_value(f"{s.get('CANISTER_ANGLE', '-')} deg")
-        lid = s.get('LID_ANGLE','-')
-        self._lid_st.set_value('열림' if lid=='90' else '닫힘' if lid=='0' else lid)
-        mx = s.get('MIXER_STATE','-')
-        self._mixer_st.set_value('작동' if mx=='RUN' else '정지' if mx=='STOP' else mx,
-                                 CLR_BUSY if mx=='RUN' else CLR_IDLE if mx=='STOP' else '#313244')
-        p1s = s.get('P1_STATE','-')
-        self._p1_st.set_value(f"{p1s}/{s.get('P1_DIR','-')}/{s.get('P1_REMAIN_MS','-')}ms",
-                              CLR_BUSY if p1s=='RUN' else CLR_IDLE if p1s=='STOP' else '#313244')
-        p23s = s.get('P23_STATE','-')
-        self._p23_st.set_value(f"{p23s}/{s.get('P23_DIR','-')}/{s.get('P23_REMAIN_MS','-')}ms",
-                               CLR_BUSY if p23s=='RUN' else CLR_IDLE if p23s=='STOP' else '#313244')
+        lin = _fb_get(s, 'LINEAR_STATE', 'M2_STATE')
+        self._m2_state.set_value(lin, self._state_bg(lin))
+        self._m2_fb.set_value(f"{_fb_get(s, 'LINEAR_FB_MM', 'M2_MM_FB')} mm")
+        self._m2_cmd.set_value(f"{_fb_get(s, 'LINEAR_CMD_MM', 'LINEAR_MM_CMD', 'M2_MM_CMD')} mm")
+        self._m2_err.set_value(f"{_fb_get(s, 'LINEAR_ERR_MM', 'M2_ERR_MM')} mm")
+        self._canister_st.set_value(f"{_fb_get(s, 'CANISTER_ANGLE')} deg")
+        lid = _fb_get(s, 'LID_ANGLE')
+        self._lid_st.set_value('열림' if lid == '90' else '닫힘' if lid == '0' else lid)
+        mx = _fb_get(s, 'MIXER_STATE')
+        self._mixer_st.set_value(
+            '작동' if mx == 'RUN' else '정지' if mx in ('STOP', 'IDLE') else mx,
+            CLR_BUSY if mx == 'RUN' else CLR_IDLE if mx in ('STOP', 'IDLE') else '#313244',
+        )
+        p1s = _fb_get(s, 'PUMP1_STATE', 'P1_STATE')
+        self._p1_st.set_value(
+            f"{p1s}/{_fb_get(s, 'PUMP1_DIR', 'P1_DIR')}/{_fb_get(s, 'PUMP1_REMAIN_MS', 'P1_REMAIN_MS')}ms",
+            CLR_BUSY if p1s == 'RUN' else CLR_IDLE if p1s in ('STOP', 'IDLE') else '#313244',
+        )
+        p23s = _fb_get(s, 'PUMP23_STATE', 'P23_STATE')
+        self._p23_st.set_value(
+            f"{p23s}/{_fb_get(s, 'PUMP23_DIR', 'P23_DIR')}/{_fb_get(s, 'PUMP23_REMAIN_MS', 'P23_REMAIN_MS')}ms",
+            CLR_BUSY if p23s == 'RUN' else CLR_IDLE if p23s in ('STOP', 'IDLE') else '#313244',
+        )
 
 
 
@@ -773,14 +804,10 @@ class SpectrometerTab(QWidget):
         return box
 
     def _on_scilab_feedback_spec_lab(self, line: str) -> None:
-        if not line.startswith('FB,'):
+        s = parse_scilab_feedback(line)
+        if s is None:
             return
-        s: dict[str, str] = {}
-        for p in line[3:].split(','):
-            if ':' in p:
-                k, v = p.split(':', 1)
-                s[k.strip()] = v.strip()
-        m3 = s.get('M3_STATE', '-')
+        m3 = _fb_get(s, 'SLOT_STATE', 'M3_STATE')
 
         def _bg(st: str) -> str:
             if st == 'IDLE':
@@ -792,9 +819,9 @@ class SpectrometerTab(QWidget):
             return '#313244'
 
         self._m3_state.set_value(m3, _bg(m3))
-        self._m3_slot.set_value(s.get('M3_SLOT_CMD', '-'))
-        self._m3_err.set_value(s.get('M3_ERR_ENC', '-'))
-        rl = s.get('RELAY', '-')
+        self._m3_slot.set_value(_fb_get(s, 'SLOT_CMD', 'SLOT_INDEX', 'M3_SLOT_CMD'))
+        self._m3_err.set_value(_fb_get(s, 'SLOT_ERR', 'SLOT_ERR_ENC', 'M3_ERR_ENC'))
+        rl = _fb_get(s, 'RELAY')
         self._relay_st.set_value(rl, CLR_BUSY if rl == 'ON' else CLR_IDLE if rl == 'OFF' else '#313244')
 
     def _parse_cal_csv(self, path: str) -> tuple[list[tuple[float, float]], float | None, bool]:

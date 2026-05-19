@@ -1,0 +1,44 @@
+# systemd 유닛 예시 — 로버 UMPC에 설치 시 User 와 경로를 환경에 맞게 수정하세요.
+#
+# 설치 요약:
+#   1) sudo cp systemd/rover_daemon.default.example /etc/default/rover_daemon
+#      편집: ROS_DISTRO, SCIENCE_WS, ROS_DOMAIN_ID
+#   2) sudo cp systemd/rover_daemon.service /etc/systemd/system/rover_daemon.service
+#      편집: User= , Group=
+#   3) sudo systemctl daemon-reload
+#   4) sudo systemctl enable --now rover_daemon.service
+#
+# 로그: journalctl -u rover_daemon -f
+
+[Unit]
+Description=Rover ROS2 rover_daemon (science_gui remote rover.launch trigger)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=yongwon
+Group=yongwon
+SupplementaryGroups=video dialout plugdev
+
+EnvironmentFile=/etc/default/rover_daemon
+
+ExecStart=/bin/bash -lc '\
+set -euo pipefail; \
+: "${SCIENCE_WS:?SCIENCE_WS unset — configure /etc/default/rover_daemon}"; \
+: "${ROS_DISTRO:?ROS_DISTRO unset — configure /etc/default/rover_daemon}"; \
+source "/opt/ros/${ROS_DISTRO}/setup.bash"; \
+source "${SCIENCE_WS}/install/setup.bash"; \
+exec ros2 launch science_gui rover_daemon.launch.py \
+  workspace_setup:=${SCIENCE_WS}/install/setup.bash'
+
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

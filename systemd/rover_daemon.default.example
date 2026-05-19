@@ -1,0 +1,8 @@
+파# /etc/default/rover_daemon 로 복사 후 값 수정:
+#   sudo cp rover_daemon.default.example /etc/default/rover_daemon
+#   sudo chmod 644 /etc/default/rover_daemon
+#
+ROS_DISTRO=humble
+SCIENCE_WS=/home/yongwon/science_ws
+# 기지국과 동일해야 DDS에서 서로 보임 (.bashrc 의 ROS_DOMAIN_ID 와 맞출 것)
+ROS_DOMAIN_ID=13

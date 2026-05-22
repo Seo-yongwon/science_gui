@@ -1,4 +1,4 @@
-"""UMPC에서 실행: USB 카메라 4개 → 2x2 모자이크 → GStreamer UDP H.264 송신."""
+"""UMPC에서 실행: USB 카메라 3개 → 1x3 가로 합성 → GStreamer UDP H.264 송신."""
 from __future__ import annotations
 
 import queue
@@ -20,20 +20,20 @@ SENSOR_QOS = QoSProfile(
 
 
 class GstSenderNode(Node):
-    """USB 카메라 4개 토픽 → 2x2 모자이크 → GStreamer UDP H.264 송신.
+    """USB 카메라 3개 토픽 → 1x3 가로 합성 → GStreamer UDP H.264 송신.
 
     카메라별로 독립 구독해 최신 프레임을 저장하고,
-    타이머가 일정 FPS로 모자이크를 합성해 인코딩 스레드에 전달한다.
+    타이머가 일정 FPS로 합성해 인코딩 스레드에 전달한다.
     인코더가 바쁘면 프레임을 드롭해 지연 누적을 방지한다.
     """
 
     def __init__(self) -> None:
         super().__init__('gst_sender')
 
+        self.declare_parameter('num_cameras', 3)
         self.declare_parameter('topic_cam0',  '/camera/front/image_raw')
         self.declare_parameter('topic_cam1',  '/camera/back/image_raw')
         self.declare_parameter('topic_cam2',  '/camera/soil/image_raw')
-        self.declare_parameter('topic_cam3',  '/camera/cashe/image_raw')
         self.declare_parameter('host',        '192.168.1.30')
         self.declare_parameter('port',        5000)
         self.declare_parameter('fps',         30.0)
@@ -41,9 +41,10 @@ class GstSenderNode(Node):
         self.declare_parameter('tile_height', 360)
         self.declare_parameter('bitrate',     2000)   # kbps
 
+        n_cams = int(self.get_parameter('num_cameras').value)
         topics = [
             self.get_parameter(f'topic_cam{i}').get_parameter_value().string_value
-            for i in range(4)
+            for i in range(n_cams)
         ]
         host     = self.get_parameter('host').get_parameter_value().string_value
         port     = int(self.get_parameter('port').value)
@@ -53,9 +54,10 @@ class GstSenderNode(Node):
         bitrate  = int(self.get_parameter('bitrate').value)
 
         self._bridge = CvBridge()
+        self._n_cams = n_cams
 
         # 카메라별 최신 프레임 (None = 아직 수신 전)
-        self._frames: list[np.ndarray | None] = [None] * 4
+        self._frames: list[np.ndarray | None] = [None] * n_cams
         self._frame_lock = threading.Lock()
 
         # 인코딩 스레드 큐: maxsize=1 → 느리면 드롭
@@ -73,21 +75,19 @@ class GstSenderNode(Node):
                 SENSOR_QOS,
             )
 
-        # 모자이크 합성 타이머
+        # 합성 타이머
         self.create_timer(1.0 / fps, self._tick)
 
+        cam_lines = '\n'.join(f'  cam{i}: {topics[i]}' for i in range(n_cams))
         self.get_logger().info(
             f'GstSender ready\n'
-            f'  cam0: {topics[0]}\n'
-            f'  cam1: {topics[1]}\n'
-            f'  cam2: {topics[2]}\n'
-            f'  cam3: {topics[3]}\n'
+            f'{cam_lines}\n'
             f'  dst : udp://{host}:{port}  '
-            f'tile={self._tw}x{self._th}  fps={fps}  bitrate={bitrate}kbps'
+            f'layout=1x{n_cams}  tile={self._tw}x{self._th}  fps={fps}  bitrate={bitrate}kbps'
         )
 
     def _open_pipeline(self, host: str, port: int, fps: float, bitrate: int) -> cv2.VideoWriter:
-        w, h = self._tw * 2, self._th * 2
+        w, h = self._tw * self._n_cams, self._th
         pipe = (
             f'appsrc ! videoconvert ! '
             f'video/x-raw,format=I420,width={w},height={h},framerate={int(fps)}/1 ! '
@@ -114,10 +114,7 @@ class GstSenderNode(Node):
         blank = np.zeros((self._th, self._tw, 3), dtype=np.uint8)
         tiles = [f if f is not None else blank for f in frames]
 
-        mosaic = np.vstack([
-            np.hstack([tiles[0], tiles[1]]),
-            np.hstack([tiles[2], tiles[3]]),
-        ])
+        mosaic = np.hstack(tiles)
 
         try:
             self._send_queue.put_nowait(mosaic)

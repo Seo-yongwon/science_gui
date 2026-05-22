@@ -38,7 +38,6 @@ def generate_launch_description() -> LaunchDescription:
         #   - /npk/data                 구독 (자동 CSV 저장)
         #   - /spectrometer/*           구독/발행
         #   - /mission/panorama/trigger 서비스 클라이언트
-        #   - /rover/trigger_launch     서비스 클라이언트 (로버 rover_daemon 전제)
         # ═══════════════════════════════════════════════════════════
         Node(
             package='science_gui',

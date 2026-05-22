@@ -53,11 +53,11 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument('pano_settle',    default_value='2.0'),
 
         # ═══════════════════════════════════════════════════════════
-        # cam_driver: USB 웹캠 4개 → ROS2 Image 토픽
+        # cam_driver: USB 웹캠 → ROS2 Image 토픽
         #   /camera/front/image_raw
         #   /camera/back/image_raw
         #   /camera/soil/image_raw
-        #   /camera/cashe/image_raw
+        #   (device3/cashe 는 미연결 시 무시)
         # ═══════════════════════════════════════════════════════════
         Node(
             package='science_gui',
@@ -82,9 +82,9 @@ def generate_launch_description() -> LaunchDescription:
         ),
 
         # ═══════════════════════════════════════════════════════════
-        # gst_sender: 카메라 4개 → 2x2 모자이크 → UDP H.264 송신
+        # gst_sender: 카메라 3개 → 1x3 가로 합성 → UDP H.264 송신
         #   목적지: basestation_ip:stream_port
-        #   최종 해상도: (tile_width×2) × (tile_height×2)
+        #   최종 해상도: (tile_width×3) × tile_height
         # ═══════════════════════════════════════════════════════════
         Node(
             package='science_gui',
@@ -92,10 +92,10 @@ def generate_launch_description() -> LaunchDescription:
             name='gst_sender',
             output='screen',
             parameters=[{
+                'num_cameras': 3,
                 'topic_cam0':  '/camera/front/image_raw',
                 'topic_cam1':  '/camera/back/image_raw',
                 'topic_cam2':  '/camera/soil/image_raw',
-                'topic_cam3':  '/camera/cashe/image_raw',
                 'host':        LaunchConfiguration('basestation_ip'),
                 'port':        LaunchConfiguration('stream_port'),
                 'fps':         LaunchConfiguration('cam_fps'),

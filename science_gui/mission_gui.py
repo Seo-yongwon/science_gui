@@ -23,6 +23,8 @@ from std_msgs.msg import Float32MultiArray, String
 from std_srvs.srv import Trigger
 from cv_bridge import CvBridge
 
+from science_gui.capture_report import register_capture
+
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
@@ -80,6 +82,24 @@ GRAPH_WINDOW_SEC = 60
 GRAPH_STEP_SEC   = 4
 GRAPH_MAX_POINTS = 15
 
+# 실제 UDP 송신 레이아웃 (gst_sender 1x3 코드와 다름):
+#   [ 토양 | 캐시 ]           ← 상단
+#   [ 파노라마 스트림 (전폭) ] ← 하단
+STREAM_REGIONS = (
+    ('soil',      '토양', 'top',    0),
+    ('cashe',     '캐시', 'top',    1),
+    ('pano_live', '파노', 'bottom', 0),
+)
+
+
+def _crop_stream_region(merged: np.ndarray, row: str, col: int) -> np.ndarray:
+    h, w = merged.shape[:2]
+    mid = h // 2
+    if row == 'top':
+        tw = w // 2
+        return merged[:mid, col * tw:(col + 1) * tw]
+    return merged[mid:, :]
+
 STYLE = """
 * { font-family: "Segoe UI", "Noto Sans", "Ubuntu", sans-serif; }
 QMainWindow, QWidget { background-color: #1e1e2e; }
@@ -131,12 +151,11 @@ QPushButton#accentBtn:hover { background-color: #74c7ec; }
 QPushButton#panoBtn   { background-color: #cba6f7; color: #11111b; font-size: 14px; border-radius: 8px; min-height: 44px; }
 QPushButton#panoBtn:hover   { background-color: #b4befe; }
 QPushButton#panoBtn:disabled { background-color: #45475a; color: #6c7086; }
-QPushButton#roverLaunchBtn {
-    background-color: #f9e2af; color: #11111b; font-size: 13px;
+QPushButton#camCapBtn {
+    background-color: #89b4fa; color: #11111b; font-size: 12px;
     border-radius: 8px; min-height: 44px;
 }
-QPushButton#roverLaunchBtn:hover { background-color: #f5d076; }
-QPushButton#roverLaunchBtn:disabled { background-color: #45475a; color: #6c7086; }
+QPushButton#camCapBtn:hover { background-color: #74c7ec; }
 QPushButton#utilBtn   { background: transparent; color: #6c7086; border: 1px solid #313244; border-radius: 6px; font-size: 12px; min-height: 40px; }
 QPushButton#utilBtn:hover  { color: #cdd6f4; border-color: #45475a; }
 QPushButton#saveBtn   { background-color: #94e2d5; color: #11111b; min-height: 40px; }
@@ -158,11 +177,17 @@ QPushButton#slotBtn:hover  { background-color: #6c7086; }
 """
 
 
+def _register_capture_html(save_dir: str, image_path: str) -> None:
+    try:
+        register_capture(save_dir, image_path)
+    except OSError:
+        pass
+
+
 class FrameBridge(QObject):
     merged_frame     = pyqtSignal(np.ndarray)
     pano_status      = pyqtSignal(str)
     pano_result      = pyqtSignal(np.ndarray)
-    rover_launch_status = pyqtSignal(str)
     scilab_feedback  = pyqtSignal(str)
     npk_data         = pyqtSignal(str)
     spec_spectrum    = pyqtSignal(object)
@@ -175,14 +200,11 @@ class MissionGuiNode(Node):
         super().__init__('mission_gui')
         self.declare_parameter('save_dir',     os.path.expanduser('~/camera_captures'))
         self.declare_parameter('topic_merged', '/camera/merged/image_raw')
-        self.declare_parameter('rover_launch_service', '/rover/trigger_launch')
         self._cv      = CvBridge()
         self._signals = signals
         self._merged: np.ndarray | None = None
         merged_topic = self.get_parameter('topic_merged').get_parameter_value().string_value
         self.create_subscription(Image, merged_topic, self._on_merged, SENSOR_QOS)
-        rover_launch_srv = self.get_parameter('rover_launch_service').get_parameter_value().string_value
-        self._rover_launch_cli = self.create_client(Trigger, rover_launch_srv)
         self._pano_cli   = self.create_client(Trigger, '/mission/panorama/trigger')
         self._scilab_pub = self.create_publisher(String, '/scilab/cmd', 10)
         self.create_subscription(String, '/scilab/feedback', self._on_scilab_fb, 10)
@@ -200,28 +222,13 @@ class MissionGuiNode(Node):
         msg = String(); msg.data = cmd; self._scilab_pub.publish(msg)
 
     def call_panorama(self) -> None:
-        if not self._pano_cli.service_is_ready():
-            self._signals.pano_status.emit('mission_panorama 노드 미연결'); return
-        self._signals.pano_status.emit('파노라마 촬영 시작...')
-        self._pano_cli.call_async(Trigger.Request()).add_done_callback(self._pano_done)
-
-    def call_rover_launch(self) -> None:
-        cli = self._rover_launch_cli
-        if not cli.service_is_ready():
-            self._signals.rover_launch_status.emit(
-                '로버 rover_launch_trigger 미연결 — 로버에서 rover_daemon.launch 실행 여부 확인'
+        if not self._pano_cli.wait_for_service(timeout_sec=3.0):
+            self._signals.pano_status.emit(
+                'mission_panorama 미연결 — 로버에서 rover.launch 실행·ROS_DOMAIN_ID 확인'
             )
             return
-        cli.call_async(Trigger.Request()).add_done_callback(self._rover_launch_done)
-
-    def _rover_launch_done(self, future) -> None:
-        try:
-            res = future.result()
-            self._signals.rover_launch_status.emit(
-                res.message if res.success else f'실패: {res.message}'
-            )
-        except Exception as e:
-            self._signals.rover_launch_status.emit(f'오류: {e}')
+        self._signals.pano_status.emit('파노라마 촬영 시작...')
+        self._pano_cli.call_async(Trigger.Request()).add_done_callback(self._pano_done)
 
     def _pano_done(self, future) -> None:
         try:
@@ -621,11 +628,50 @@ class NPKTab(QWidget):
             if lo==hi: lo-=1; hi+=1
             m = max((hi-lo)*0.15,1.0); self._plot_npk.setYRange(lo-m,hi+m,padding=0)
 
+    def _apply_npk_plot_theme(self, *, export: bool) -> None:
+        plots = (
+            (self._plot_moist, '습도', '%'),
+            (self._plot_temp, '온도', 'C'),
+            (self._plot_ph, 'pH', 'pH'),
+            (self._plot_ec, 'EC', 'us/cm'),
+            (self._plot_npk, 'N / P / K', 'mg/kg'),
+        )
+        if export:
+            bg, fg, title_c, grid_a = '#ffffff', '#11111b', '#11111b', 0.25
+            self._graph_w.setStyleSheet('background-color:#ffffff;')
+        else:
+            bg, fg, title_c, grid_a = '#1e1e2e', '#cdd6f4', '#cdd6f4', 0.15
+            self._graph_w.setStyleSheet('background-color:transparent;')
+
+        for pw, plot_title, ylabel in plots:
+            pw.setBackground(bg)
+            pw.setLabel('left', ylabel, color=fg)
+            pw.setLabel('bottom', '시간', 's', color=fg)
+            pw.setTitle(plot_title, color=title_c, size='10pt')
+            pw.showGrid(x=True, y=True, alpha=grid_a)
+            pi = pw.getPlotItem()
+            for axis_name in ('left', 'bottom'):
+                ax = pi.getAxis(axis_name)
+                ax.setPen(pg.mkPen(fg))
+                ax.setTextPen(pg.mkPen(fg))
+            leg = pi.legend
+            if leg is not None:
+                for _sample, label in leg.items:
+                    label.setText(label.text, color=fg)
+
     def _save_graph(self) -> None:
         if self._graph_w is None: return
         d = os.path.join(self._save_dir,'npk'); os.makedirs(d,exist_ok=True)
         path = os.path.join(d,f'npk_graph_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png')
-        self._graph_w.grab().save(path); self._npk_status.setText(f'그래프 저장: {os.path.basename(path)}')
+        self._apply_npk_plot_theme(export=True)
+        QApplication.processEvents()
+        try:
+            self._graph_w.grab().save(path)
+        finally:
+            self._apply_npk_plot_theme(export=False)
+            QApplication.processEvents()
+        _register_capture_html(self._save_dir, path)
+        self._npk_status.setText(f'그래프 저장: {os.path.basename(path)}')
 
 
 
@@ -1047,7 +1093,9 @@ class SpectrometerTab(QWidget):
         if not HAS_PYQTGRAPH or self._spec_plot is None: return
         d=os.path.join(self._save_dir,'spectrometer'); os.makedirs(d,exist_ok=True)
         path=os.path.join(d,f'spectrum_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png')
-        self._spec_plot.grab().save(path); self._spec_status_lbl.setText(f'PNG: {os.path.basename(path)}')
+        self._spec_plot.grab().save(path)
+        _register_capture_html(self._save_dir, path)
+        self._spec_status_lbl.setText(f'PNG: {os.path.basename(path)}')
 
 
 class MainWindow(QMainWindow):
@@ -1067,16 +1115,21 @@ class MainWindow(QMainWindow):
         bar=QHBoxLayout(); bar.setSpacing(8)
         self._status=QLabel('영상 대기중...'); self._status.setObjectName('statusLabel')
         bar.addWidget(self._status,1)
-        btn_cap=QPushButton('캡처'); btn_cap.setObjectName('accentBtn'); btn_cap.setFixedSize(100,44)
-        btn_cap.clicked.connect(self._capture_merged); bar.addWidget(btn_cap)
+        for region_id, label, _row, _col in STREAM_REGIONS:
+            btn = QPushButton(label)
+            btn.setObjectName('camCapBtn')
+            btn.setFixedSize(72, 44)
+            btn.setToolTip(f'{label} 영역 캡처 ({region_id})')
+            btn.clicked.connect(lambda _checked=False, rid=region_id: self._capture_region(rid))
+            bar.addWidget(btn)
+        btn_all = QPushButton('전체')
+        btn_all.setObjectName('accentBtn')
+        btn_all.setFixedSize(72, 44)
+        btn_all.setToolTip('합성 영상 전체 캡처 (상단 토양·캐시 + 하단 파노)')
+        btn_all.clicked.connect(self._capture_all)
+        bar.addWidget(btn_all)
         self._pano_btn=QPushButton('파노라마'); self._pano_btn.setObjectName('panoBtn'); self._pano_btn.setFixedSize(100,44)
         self._pano_btn.clicked.connect(self._trigger_panorama); bar.addWidget(self._pano_btn)
-        self._rover_launch_btn=QPushButton('로버 스택'); self._rover_launch_btn.setObjectName('roverLaunchBtn')
-        self._rover_launch_btn.setFixedSize(100,44)
-        self._rover_launch_btn.setToolTip(
-            '로버에서 rover_daemon.launch 가 실행 중일 때 rover.launch.py 를 백그라운드로 시작합니다.'
-        )
-        self._rover_launch_btn.clicked.connect(self._trigger_rover_launch); bar.addWidget(self._rover_launch_btn)
         dir_btn=QPushButton('...'); dir_btn.setObjectName('utilBtn'); dir_btn.setFixedSize(44,44)
         dir_btn.setToolTip('저장 폴더 변경'); dir_btn.clicked.connect(self._pick_dir); bar.addWidget(dir_btn)
         left.addLayout(bar); root.addLayout(left,3)
@@ -1092,7 +1145,6 @@ class MainWindow(QMainWindow):
         signals.merged_frame.connect(self._update_video)
         signals.pano_status.connect(self._on_pano_status)
         signals.pano_result.connect(self._save_pano_result)
-        signals.rover_launch_status.connect(self._on_rover_launch_status)
 
     def _update_video(self, frame: np.ndarray) -> None:
         h,w,ch=frame.shape; qimg=QImage(frame.data,w,h,w*ch,QImage.Format_RGB888)
@@ -1100,31 +1152,47 @@ class MainWindow(QMainWindow):
         lbl.setPixmap(QPixmap.fromImage(qimg).scaled(lbl.width(),lbl.height(),Qt.KeepAspectRatio,Qt.FastTransformation))
         self._status.setText(f'영상: {w}x{h}')
 
-    def _capture_merged(self) -> None:
-        if self._node._merged is None: self._show_toast('영상 없음'); return
-        os.makedirs(self._save_dir,exist_ok=True)
-        path=os.path.join(self._save_dir,f'merged_{datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]}.png')
-        cv2.imwrite(path,cv2.cvtColor(self._node._merged,cv2.COLOR_RGB2BGR))
-        self._show_toast(f'저장: {os.path.basename(path)}')
+    def _capture_region(self, region_id: str) -> None:
+        merged = self._node._merged
+        if merged is None:
+            self._show_toast('영상 없음')
+            return
+        region = next(
+            ((rid, lbl, row, col) for rid, lbl, row, col in STREAM_REGIONS if rid == region_id),
+            None,
+        )
+        if region is None:
+            return
+        rid, label, row, col = region
+        frame = _crop_stream_region(merged, row, col)
+        os.makedirs(self._save_dir, exist_ok=True)
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]
+        path = os.path.join(self._save_dir, f'{rid}_{ts}.png')
+        cv2.imwrite(path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+        _register_capture_html(self._save_dir, path)
+        self._show_toast(f'{label} 저장: {os.path.basename(path)}')
+
+    def _capture_all(self) -> None:
+        merged = self._node._merged
+        if merged is None:
+            self._show_toast('영상 없음')
+            return
+        os.makedirs(self._save_dir, exist_ok=True)
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]
+        path = os.path.join(self._save_dir, f'merged_{ts}.png')
+        cv2.imwrite(path, cv2.cvtColor(merged, cv2.COLOR_RGB2BGR))
+        _register_capture_html(self._save_dir, path)
+        self._show_toast(f'전체 저장: {os.path.basename(path)}')
 
     def _trigger_panorama(self) -> None:
         self._pano_btn.setEnabled(False); self._pano_btn.setText('촬영중...'); self._node.call_panorama()
-
-    def _trigger_rover_launch(self) -> None:
-        self._rover_launch_btn.setEnabled(False)
-        self._rover_launch_btn.setText('요청...')
-        self._node.call_rover_launch()
-
-    def _on_rover_launch_status(self, text: str) -> None:
-        self._rover_launch_btn.setEnabled(True)
-        self._rover_launch_btn.setText('로버 스택')
-        self._show_toast(text)
 
     def _save_pano_result(self, frame: np.ndarray) -> None:
         d = os.path.join(self._save_dir, 'panorama')
         os.makedirs(d, exist_ok=True)
         path = os.path.join(d, f'panorama_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png')
         cv2.imwrite(path, frame)
+        _register_capture_html(self._save_dir, path)
         self._show_toast(f'파노라마 저장: {os.path.basename(path)}')
 
     def _on_pano_status(self, text: str) -> None:

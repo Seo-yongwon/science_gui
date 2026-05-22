@@ -100,6 +100,46 @@ def _crop_stream_region(merged: np.ndarray, row: str, col: int) -> np.ndarray:
         return merged[:mid, col * tw:(col + 1) * tw]
     return merged[mid:, :]
 
+
+# 토양 축척 표시 (1280×720 기준 좌표 → 캡처 해상도에 비례 스케일)
+_SOIL_SCALE_REF = (1280, 720)
+_SOIL_SCALE_BAR = (570, 740, 5, 35)   # x1, x2, y_top, y_bottom
+_SOIL_SCALE_TEXT_OFFSET_Y = 20
+_SOIL_SCALE_LABEL = '20mm'
+
+
+def _draw_soil_scale_bar(frame_bgr: np.ndarray) -> None:
+    h, w = frame_bgr.shape[:2]
+    ref_w, ref_h = _SOIL_SCALE_REF
+    sx, sy = w / ref_w, h / ref_h
+    scale = (sx + sy) / 2
+
+    x1, x2, y_top, y_bottom = _SOIL_SCALE_BAR
+    x1 = int(round(x1 * sx))
+    x2 = int(round(x2 * sx))
+    y_top = int(round(y_top * sy))
+    y_bottom = int(round(y_bottom * sy))
+    center_y = (y_top + y_bottom) // 2
+
+    color = (0, 0, 255)
+    thickness = max(1, int(round(2 * scale)))
+
+    cv2.line(frame_bgr, (x1, y_top), (x1, y_bottom), color, thickness)
+    cv2.line(frame_bgr, (x2, y_top), (x2, y_bottom), color, thickness)
+    cv2.line(frame_bgr, (x1, center_y), (x2, center_y), color, thickness)
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.6 * scale
+    text_thickness = max(1, int(round(2 * scale)))
+    text_size, _ = cv2.getTextSize(_SOIL_SCALE_LABEL, font, font_scale, text_thickness)
+    text_x = (x1 + x2) // 2 - text_size[0] // 2
+    text_y = center_y + int(round(_SOIL_SCALE_TEXT_OFFSET_Y * sy)) + text_size[1]
+    cv2.putText(
+        frame_bgr, _SOIL_SCALE_LABEL, (text_x, text_y),
+        font, font_scale, color, text_thickness, cv2.LINE_AA,
+    )
+
+
 STYLE = """
 * { font-family: "Segoe UI", "Noto Sans", "Ubuntu", sans-serif; }
 QMainWindow, QWidget { background-color: #1e1e2e; }
@@ -1168,7 +1208,10 @@ class MainWindow(QMainWindow):
         os.makedirs(self._save_dir, exist_ok=True)
         ts = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]
         path = os.path.join(self._save_dir, f'{rid}_{ts}.png')
-        cv2.imwrite(path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        if rid == 'soil':
+            _draw_soil_scale_bar(frame_bgr)
+        cv2.imwrite(path, frame_bgr)
         _register_capture_html(self._save_dir, path)
         self._show_toast(f'{label} 저장: {os.path.basename(path)}')
 

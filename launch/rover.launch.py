@@ -146,8 +146,9 @@ def generate_launch_description() -> LaunchDescription:
             parameters=[{
                 'camera_topic':        LaunchConfiguration('pano_camera'),
                 'gps_topic':           '/mb00b/fix',
-                'heading_topic':       '/gnss_heading/yaw_deg',
-                'heading_valid_topic': '/gnss_heading/valid',
+                'heading_topic':           '/imu/gnss_heading',
+                'heading_yaw_deg_topic':   '/gnss_heading/yaw_deg',
+                'heading_valid_topic':     '/gnss_heading/valid',
                 'result_topic':        '/panorama/result',
                 'save_dir':            LaunchConfiguration('pano_save_dir'),
                 'start_angle':         LaunchConfiguration('pano_start_ang'),

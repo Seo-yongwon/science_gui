@@ -103,7 +103,7 @@ def _crop_stream_region(merged: np.ndarray, row: str, col: int) -> np.ndarray:
 
 # 토양 축척 표시 (1280×720 기준 좌표 → 캡처 해상도에 비례 스케일)
 _SOIL_SCALE_REF = (1280, 720)
-_SOIL_SCALE_BAR = (570, 740, 5, 35)   # x1, x2, y_top, y_bottom
+_SOIL_SCALE_BAR = (570, 797, 5, 35)   # x1, x2, y_top, y_bottom (x2: +1/3 bar length, right only)
 _SOIL_SCALE_TEXT_OFFSET_Y = 20
 _SOIL_SCALE_LABEL = '20mm'
 
